@@ -1,0 +1,50 @@
+{
+  "eval_date": "2026-08-17",
+  "framework": "5-layer industrial agent evaluation",
+  "config": {
+    "research_model": "deepseek-v4-flash",
+    "search_api": "tavily",
+    "proxy": "cc-switch local"
+  },
+  "layers": {
+    "1_task_completion": {
+      "status": "40%",
+      "e2e_report_rate": "100% (multiple regressions)",
+      "termination_guarantee": "3-round cap + 60s timeout",
+      "fixed_task_set": "not yet (needs token budget)"
+    },
+    "2_output_quality": {
+      "status": "30%",
+      "method": "LLM-as-Judge (deepseek-v4-flash, 3 dimensions)",
+      "data": "2 queries, fork vs upstream: comparable (4-5/5 range)",
+      "sample_size": "insufficient for statistical significance"
+    },
+    "3_efficiency_cost": {
+      "status": "60%",
+      "tracking": "dual-layer (in-process callback + cc-switch proxy logs)",
+      "data": {
+        "query1_lstm": {"fork": 0.103, "upstream": 0.239, "delta": "-57%"},
+        "query2_transformer": {"fork": 0.249, "upstream": 0.153, "delta": "+64%"}
+      },
+      "note": "mixed results, sample too small to generalize"
+    },
+    "4_robustness": {
+      "status": "90%",
+      "fixes": ["#1 judgment node", "#2 checkpointer", "#3 rate-limit tolerance", "#4 UI markers", "#5 timeout degradation", "#6 convergence + concurrency"],
+      "fault_injection_tested": true,
+      "verdict": "strongest layer"
+    },
+    "5_safety": {
+      "status": "10%",
+      "prompt_injection": "not tested",
+      "groundedness": "evaluator exists, no data",
+      "vector_memory溯源": "recall returns source URL"
+    }
+  },
+  "total_eval_cost_usd": 0.7607,
+  "next_steps": [
+    "Expand layer 2: run 5-10 queries for statistically meaningful quality comparison",
+    "Add layer 5 groundedness: verify report facts have sources",
+    "Build layer 1 regression set: 5-10 fixed queries with pass/fail criteria"
+  ]
+}

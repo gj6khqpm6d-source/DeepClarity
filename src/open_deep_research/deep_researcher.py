@@ -1,7 +1,8 @@
 """Main LangGraph implementation for the Deep Research agent."""
 
 import asyncio
-from typing import Literal
+import logging
+from typing import Literal, Optional
 
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import (
@@ -13,6 +14,7 @@ from langchain_core.messages import (
     get_buffer_string,
 )
 from langchain_core.runnables import RunnableConfig
+from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command
 
@@ -25,18 +27,20 @@ from open_deep_research.prompts import (
     compress_research_system_prompt,
     final_report_generation_prompt,
     lead_researcher_prompt,
+    pre_search_prompt,
     research_system_prompt,
     transform_messages_into_research_topic_prompt,
 )
 from open_deep_research.state import (
     AgentInputState,
     AgentState,
-    ClarifyWithUser,
+    AmbiguityAssessment,
     ConductResearch,
     ResearchComplete,
     ResearcherOutputState,
     ResearcherState,
     ResearchQuestion,
+    SearchQueries,
     SupervisorState,
 )
 from open_deep_research.utils import (
@@ -51,22 +55,134 @@ from open_deep_research.utils import (
     remove_up_to_last_ai_message,
     think_tool,
 )
+from open_deep_research.vector_memory import clear_memory
 
 # Initialize a configurable model that we will use throughout the agent
 configurable_model = init_chat_model(
     configurable_fields=("model", "max_tokens", "api_key"),
 )
 
+logger = logging.getLogger(__name__)
+
+def _assess_need_clarification(assessment: AmbiguityAssessment) -> bool:
+    """Deterministic rule deciding whether to ask the user a clarifying question.
+
+    - A vague subject always warrants a question: the subject anchors the whole report,
+      and guessing it wrong invalidates the research.
+    - Otherwise ask only when multiple dimensions are vague AND the pre-search could not
+      anchor the subject. Single-dimension gaps (e.g. audience) become assumptions.
+
+    This keeps the decision auditable and tunable: the model only scores, the code rules.
+    """
+    if assessment.subject_clear == "vague":
+        return True
+    vague_dimensions = sum(
+        1
+        for value in (
+            assessment.scope_clear,
+            assessment.audience_clear,
+            assessment.timeframe_clear,
+        )
+        if value == "vague"
+    )
+    return vague_dimensions >= 2 and not assessment.search_anchored
+
+
+async def _run_pre_search(state: AgentState, config: RunnableConfig) -> Optional[str]:
+    """Run a one-time pre-search on the user's initial request.
+
+    Generates 1-3 search queries from the user's first-round messages, executes them
+    programmatically via the configured search tool, and returns a compact context
+    string. Returns None when no programmatically callable search tool is available
+    (e.g. Anthropic/OpenAI native web search are dicts passed to the model, not callable).
+    """
+    configurable = Configuration.from_runnable_config(config)
+    model_config = {
+        "model": configurable.research_model,
+        "max_tokens": configurable.research_model_max_tokens,
+        "api_key": get_api_key_for_model(configurable.research_model, config),
+        "tags": ["langsmith:nostream"]
+    }
+
+    # Step 1: Generate focused search queries from the initial request
+    query_model = (
+        configurable_model
+        .with_structured_output(SearchQueries)
+        .with_retry(stop_after_attempt=configurable.max_structured_output_retries)
+        .with_config(model_config)
+    )
+    prompt_content = pre_search_prompt.format(
+        messages=get_buffer_string(state.get("messages", [])),
+        date=get_today_str()
+    )
+    queries_response = await query_model.ainvoke([HumanMessage(content=prompt_content)])
+    queries = getattr(queries_response, "queries", None) or []
+    if not queries:
+        logger.warning("Pre-search skipped: query model produced no queries.")
+        return None
+
+    # Step 2: Find a programmatically callable search tool (Tavily / DuckDuckGo).
+    # Native web search tools are dicts without the "search" metadata tag.
+    tools = await get_all_tools(config)
+    search_tools = [
+        t for t in tools
+        if hasattr(t, "metadata") and (t.metadata or {}).get("type") == "search"
+    ]
+    if not search_tools:
+        logger.debug(
+            "Pre-search skipped: no programmatically callable search tool "
+            "(Anthropic/OpenAI native web search is a dict, not callable)."
+        )
+        return None
+
+    # Step 3: Execute the pre-search and compact the context for downstream prompts.
+    # DDG rate limits are temporary windows (seconds to ~a minute), so a short
+    # backoff usually clears them. Cap the attempts so the pre-search can never
+    # hang the flow; on final failure we return None and clarification degrades
+    # to unanchored scoring (see ISSUES.md 修复 #3).
+    max_attempts = 3
+    result = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            result = await search_tools[0].ainvoke({"queries": queries}, config=config)
+            break
+        except Exception as e:
+            if attempt < max_attempts:
+                backoff = 2 * attempt
+                logger.warning(
+                    f"Pre-search attempt {attempt}/{max_attempts} failed "
+                    f"({type(e).__name__}: {e}). Retrying in {backoff}s..."
+                )
+                await asyncio.sleep(backoff)
+            else:
+                logger.warning(
+                    f"Pre-search attempt {attempt}/{max_attempts} failed "
+                    f"({type(e).__name__}: {e}). Giving up; clarification will "
+                    "degrade to unanchored scoring."
+                )
+    if not result:
+        logger.warning(
+            "Pre-search returned no usable results; clarification scoring will be unanchored."
+        )
+        return None
+
+    # Cap the context so the clarification prompt stays focused (Tavily already summarizes).
+    max_chars = min(getattr(configurable, "max_content_length", 50000), 12000)
+    return str(result)[:max_chars]
+
+
 async def clarify_with_user(state: AgentState, config: RunnableConfig) -> Command[Literal["write_research_brief", "__end__"]]:
-    """Analyze user messages and ask clarifying questions if the research scope is unclear.
-    
-    This function determines whether the user's request needs clarification before proceeding
-    with research. If clarification is disabled or not needed, it proceeds directly to research.
-    
+    """Judgment node: pre-search once, score ambiguity, ask only when genuinely vague.
+
+    Runs a one-time pre-search on the user's initial request, has the model score the
+    request's ambiguity across fixed dimensions, then decides via deterministic rules
+    whether to ask the user. The pre-search context is reused across clarification
+    rounds (no re-searching on user answers) and is passed to the research brief.
+
     Args:
         state: Current agent state containing user messages
         config: Runtime configuration with model settings and preferences
-        
+
     Returns:
         Command to either end with a clarifying question or proceed to research brief
     """
@@ -75,44 +191,98 @@ async def clarify_with_user(state: AgentState, config: RunnableConfig) -> Comman
     if not configurable.allow_clarification:
         # Skip clarification step and proceed directly to research
         return Command(goto="write_research_brief")
-    
-    # Step 2: Prepare the model for structured clarification analysis
-    messages = state["messages"]
+
+    # Step 2: One-time pre-search. Reused on re-entry after the user answers.
+    # Store "" (not None) when attempted-but-empty so we don't re-search each round.
+    pre_search_context = state.get("pre_search_context")
+    if pre_search_context is None:
+        pre_search_context = (await _run_pre_search(state, config)) or ""
+    update = {"pre_search_context": pre_search_context}
+
+    # Step 3: Score ambiguity with structured output (the model observes, code decides)
     model_config = {
         "model": configurable.research_model,
         "max_tokens": configurable.research_model_max_tokens,
         "api_key": get_api_key_for_model(configurable.research_model, config),
         "tags": ["langsmith:nostream"]
     }
-    
-    # Configure model with structured output and retry logic
-    clarification_model = (
+    assessment_model = (
         configurable_model
-        .with_structured_output(ClarifyWithUser)
+        .with_structured_output(AmbiguityAssessment)
         .with_retry(stop_after_attempt=configurable.max_structured_output_retries)
         .with_config(model_config)
     )
-    
-    # Step 3: Analyze whether clarification is needed
     prompt_content = clarify_with_user_instructions.format(
-        messages=get_buffer_string(messages), 
+        messages=get_buffer_string(state.get("messages", [])),
+        pre_search_context=pre_search_context or "No pre-search context was available.",
         date=get_today_str()
     )
-    response = await clarification_model.ainvoke([HumanMessage(content=prompt_content)])
-    
-    # Step 4: Route based on clarification analysis
-    if response.need_clarification:
-        # End with clarifying question for user
-        return Command(
-            goto=END, 
-            update={"messages": [AIMessage(content=response.question)]}
+    # Bound the assessment call: if the model API stalls (no timeout anywhere in the
+    # call stack), this node would block forever and astream would emit no events,
+    # so the UI shows nothing -- neither a question nor research. On timeout we
+    # degrade to proceeding with assumptions instead of hanging (ISSUES.md 修复 #5).
+    try:
+        assessment = await asyncio.wait_for(
+            assessment_model.ainvoke([HumanMessage(content=prompt_content)]),
+            timeout=configurable.clarification_assessment_timeout,
         )
-    else:
-        # Proceed to research with verification message
-        return Command(
-            goto="write_research_brief", 
-            update={"messages": [AIMessage(content=response.verification)]}
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Clarification assessment timed out after %ss; proceeding with assumptions.",
+            configurable.clarification_assessment_timeout,
         )
+        assessment = AmbiguityAssessment(
+            subject_clear="clear",
+            scope_clear="clear",
+            audience_clear="clear",
+            timeframe_clear="clear",
+            search_anchored=bool(pre_search_context),
+            question="",
+            rationale="Assessment timed out; proceeding with the user's original request.",
+            verification=(
+                "我暂时没能完成歧义评估(模型响应超时)，将基于你的原始请求直接开始研究。"
+                "如有需要，可在研究开始前补充说明。"
+            ),
+        )
+
+    # Step 4: Deterministic decision rule with a hard cap on clarification rounds
+    clarify_count = state.get("clarify_count", 0)
+    max_rounds = configurable.max_clarification_rounds
+
+    # Once the user has already answered at least one clarification round, secondary
+    # dimensions (scope/audience/timeframe) being vague no longer warrants another
+    # round -- only a still-vague subject does. This stops the "keeps asking after
+    # I answered" loop (ISSUES.md 修复 #6) while still protecting the subject anchor.
+    needs_question = (
+        _assess_need_clarification(assessment)
+        if clarify_count == 0
+        else assessment.subject_clear == "vague"
+    )
+
+    if needs_question and clarify_count < max_rounds:
+        # Ask the user, and remember the count so the loop is guaranteed to terminate.
+        # The is_clarification_question marker lets app.py tell this genuine question
+        # apart from the proceeding-to-research verification message below (both land
+        # in the same node output) -- see ISSUES.md 修复 #4.
+        question = (assessment.question or "").strip() or assessment.rationale
+        return Command(
+            goto=END,
+            update={
+                **update,
+                "clarify_count": clarify_count + 1,
+                "messages": [AIMessage(content=question, additional_kwargs={"is_clarification_question": True})],
+            },
+        )
+
+    # Proceed to research. Surface assumptions in the verification message so the
+    # user can correct them without being asked a blocking question.
+    verification = (assessment.verification or "").strip()
+    if not verification:
+        verification = "I have enough information to begin research based on your request."
+    return Command(
+        goto="write_research_brief",
+        update={**update, "messages": [AIMessage(content=verification)]},
+    )
 
 
 async def write_research_brief(state: AgentState, config: RunnableConfig) -> Command[Literal["research_supervisor"]]:
@@ -149,6 +319,7 @@ async def write_research_brief(state: AgentState, config: RunnableConfig) -> Com
     # Step 2: Generate structured research brief from user messages
     prompt_content = transform_messages_into_research_topic_prompt.format(
         messages=get_buffer_string(state.get("messages", [])),
+        pre_search_context=state.get("pre_search_context") or "No pre-search context was available.",
         date=get_today_str()
     )
     response = await research_model.ainvoke([HumanMessage(content=prompt_content)])
@@ -425,10 +596,17 @@ async def researcher(state: ResearcherState, config: RunnableConfig) -> Command[
 
 # Tool Execution Helper Function
 async def execute_tool_safely(tool, args, config):
-    """Safely execute a tool with error handling."""
+    """Safely execute a tool with error handling.
+
+    Research-phase search failures (e.g. DDG rate limiting) are expected, not fatal:
+    we log them and hand the agent an error string so it can continue on what it
+    already has instead of blocking the whole research (see ISSUES.md 修复 #3).
+    """
     try:
         return await tool.ainvoke(args, config)
     except Exception as e:
+        tool_name = getattr(tool, "name", str(tool))
+        logger.warning(f"Research tool '{tool_name}' failed: {type(e).__name__}: {e}")
         return f"Error executing tool: {str(e)}"
 
 
@@ -470,12 +648,20 @@ async def researcher_tools(state: ResearcherState, config: RunnableConfig) -> Co
         for tool in tools
     }
     
-    # Execute all tool calls in parallel
+    # Execute all tool calls, capped by a semaphore so a single researcher turn
+    # never hammers a rate-limited search API (e.g. DuckDuckGo) with a full
+    # parallel burst. Peak search concurrency is now bounded by
+    # max_concurrent_research_units * max_concurrent_tool_calls (ISSUES.md 修复 #6).
     tool_calls = most_recent_message.tool_calls
-    tool_execution_tasks = [
-        execute_tool_safely(tools_by_name[tool_call["name"]], tool_call["args"], config) 
-        for tool_call in tool_calls
-    ]
+    sem = asyncio.Semaphore(configurable.max_concurrent_tool_calls)
+
+    async def _run_limited(tool_call):
+        async with sem:
+            return await execute_tool_safely(
+                tools_by_name[tool_call["name"]], tool_call["args"], config
+            )
+
+    tool_execution_tasks = [_run_limited(tc) for tc in tool_calls]
     observations = await asyncio.gather(*tool_execution_tasks)
     
     # Create tool messages from execution results
@@ -619,11 +805,20 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
     """
     # Step 1: Extract research findings and prepare state cleanup
     notes = state.get("notes", [])
-    cleared_state = {"notes": {"type": "override", "value": []}}
+    cleared_state = {
+        "notes": {"type": "override", "value": []},
+        # Reset the clarification state so a fresh question in the same session can
+        # be clarified again (a new research cycle starts clean).
+        "clarify_count": 0,
+        "pre_search_context": None,
+    }
     findings = "\n".join(notes)
     
     # Step 2: Configure the final report generation model
     configurable = Configuration.from_runnable_config(config)
+    # A research cycle is over: drop this thread's vector memory so a fresh
+    # question in the same session starts clean (vector_memory.py).
+    clear_memory(config.get("configurable", {}).get("thread_id"))
     writer_model_config = {
         "model": configurable.final_report_model,
         "max_tokens": configurable.final_report_model_max_tokens,
@@ -716,4 +911,8 @@ deep_researcher_builder.add_edge("research_supervisor", "final_report_generation
 deep_researcher_builder.add_edge("final_report_generation", END)                   # Final exit point
 
 # Compile the complete deep researcher workflow
-deep_researcher = deep_researcher_builder.compile()
+# The in-memory checkpointer enables multi-turn memory across invocations with the
+# same thread_id. Without it every astream() call starts from a fresh, empty state,
+# which breaks the clarify loop (see ISSUES.md #4). On LangGraph Platform the platform
+# injects its own checkpointer, so this is harmless there.
+deep_researcher = deep_researcher_builder.compile(checkpointer=MemorySaver())

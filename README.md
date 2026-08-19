@@ -1,6 +1,45 @@
-# 🔬 Open Deep Research
+# 🔬 DeepClarity
 
-<img width="1388" height="298" alt="full_diagram" src="https://github.com/user-attachments/assets/12a2371b-8be2-4219-9b48-90503eb43c69" />
+**Pre-search anchored deep research agent with deterministic clarification and layered fault tolerance.**
+
+Built on [open-deep-research](https://github.com/langchain-ai/open_deep_research). Key improvements:
+
+- **Pre-search anchoring** — LLM generates queries and searches *before* deciding whether to ask the user, giving the decision real context instead of guessing
+- **Five-dimension scoring + code rules** — subject/scope/audience/timeframe/search_anchored; code decides (not LLM), eliminating clarification dead loops
+- **Layered fault tolerance** — assessment timeout degradation, per-query rate-limit tolerance, semaphore concurrency limiter
+- **Runtime vector memory** — pages are embedded on fetch; researcher can recall previously-read content semantically via `recall_from_read_content`
+
+```mermaid
+flowchart TD
+    START((START)) --> CLARIFY[clarify_with_user<br/>Ambiguity Assessment]
+
+    CLARIFY -->|subject vague<br/>or secondary vague≥2| QUESTIONS[Ask User]
+    QUESTIONS --> CLARIFY
+
+    CLARIFY -->|dimensions clear<br/>or search-anchored| BRIEF[write_research_brief<br/>Research Brief]
+
+    BRIEF --> SUPERVISOR[supervisor<br/>Task Decomposition]
+
+    SUPERVISOR --> R1[researcher_1<br/>Parallel Research]
+    SUPERVISOR --> R2[researcher_2<br/>Semaphore Rate-Limited]
+
+    R1 --> COMPRESS[compress_research<br/>Findings Compression]
+    R2 --> COMPRESS
+
+    COMPRESS -->|iterations < max| SUPERVISOR
+    COMPRESS -->|iterations ≥ max| REPORT[final_report_generation<br/>Final Report]
+
+    REPORT --> CLEAR[clear_memory<br/>Clear Vector Memory]
+    CLEAR --> END((END))
+
+    style CLARIFY fill:#f9f,stroke:#333
+    style SUPERVISOR fill:#bbf,stroke:#333
+    style R1 fill:#bfb,stroke:#333
+    style R2 fill:#bfb,stroke:#333
+    style REPORT fill:#fbb,stroke:#333
+```
+
+**Core design principle: LLM scores, code decides.** LLM handles semantic understanding and text generation; all deterministic decisions (whether to ask, whether to continue, timeout fallback) are made by rule-based code.
 
 Deep research has broken out as one of the most popular agent applications. This is a simple, configurable, fully open source deep research agent that works across many model providers, search tools, and MCP servers. It's performance is on par with many popular deep research agents ([see Deep Research Bench leaderboard](https://huggingface.co/spaces/Ayanami0730/DeepResearch-Leaderboard)).
 
@@ -147,3 +186,122 @@ The `src/legacy/` folder contains two earlier implementations that provide alter
 - **Parallel Processing**: Multiple researchers work simultaneously
 - **Speed Optimized**: Faster report generation through concurrency
 - **MCP Support**: Extensive Model Context Protocol integration
+
+---
+
+# 🔬 Open Deep Research 中文说明
+
+### 🏗️ 架构
+
+**核心设计原则：LLM 打分，代码决策。** LLM 负责语义理解和文本生成；所有确定性决策（是否提问、是否继续、超时兜底）均由基于规则的代码完成。
+
+Open Deep Research 是一个简单、可配置、完全开源的深度研究智能体，支持多种模型提供商、搜索工具和 MCP 服务器。其性能与许多热门深度研究智能体持平（参见 [Deep Research Bench 排行榜](https://huggingface.co/spaces/Ayanami0730/DeepResearch-Leaderboard)）。
+
+### 🚀 快速开始
+
+1. 克隆仓库并激活虚拟环境：
+```bash
+git clone https://github.com/langchain-ai/open_deep_research.git
+cd open_deep_research
+uv venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+```
+
+2. 安装依赖：
+```bash
+uv sync
+# 或
+uv pip install -r pyproject.toml
+```
+
+3. 配置 `.env` 文件，设置环境变量（模型选择、搜索工具等）：
+```bash
+cp .env.example .env
+```
+
+4. 启动 LangGraph 服务器：
+```bash
+uvx --refresh --from "langgraph-cli[inmem]" --with-editable . --python 3.11 langgraph dev --allow-blocking
+```
+
+启动后将在浏览器中打开 LangGraph Studio UI：
+
+```
+- 🚀 API: http://127.0.0.1:2024
+- 🎨 Studio UI: https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024
+- 📚 API 文档: http://127.0.0.1:2024/docs
+```
+
+在 `messages` 输入框中输入问题，点击 `Submit` 即可开始研究。可在 "Manage Assistants" 标签页中切换不同配置。
+
+### ⚙️ 配置说明
+
+#### LLM 模型 :brain:
+
+通过 [init_chat_model() API](https://python.langchain.com/docs/how_to/chat_models_universal_init/) 支持多种 LLM 提供商。模型用于以下不同任务（详见 [configuration.py](https://github.com/langchain-ai/open_deep_research/blob/main/src/open_deep_research/configuration.py)）：
+
+- **摘要模型**（默认：`openai:gpt-4.1-mini`）：对搜索结果进行摘要
+- **研究模型**（默认：`openai:gpt-4.1`）：驱动搜索智能体
+- **压缩模型**（默认：`openai:gpt-4.1`）：压缩研究发现
+- **最终报告模型**（默认：`openai:gpt-4.1`）：撰写最终报告
+
+> 注意：所选模型需要支持[结构化输出](https://python.langchain.com/docs/integrations/chat/)和[工具调用](https://python.langchain.com/docs/how_to/tool_calling/)。
+
+> 注意：使用 OpenRouter 请参考[此指南](https://github.com/langchain-ai/open_deep_research/issues/75#issuecomment-2811472408)；使用 Ollama 本地模型请参考[安装说明](https://github.com/langchain-ai/open_deep_research/issues/65#issuecomment-2743586318)。
+
+#### 搜索 API :mag:
+
+默认使用 [Tavily](https://www.tavily.com/) 搜索 API。支持完整的 MCP 兼容性，以及 Anthropic 和 OpenAI 的原生网页搜索。详见 [configuration.py](https://github.com/langchain-ai/open_deep_research/blob/main/src/open_deep_research/configuration.py) 中的 `search_api` 和 `mcp_config` 字段。
+
+#### 其他配置
+
+详见 [configuration.py](https://github.com/langchain-ai/open_deep_research/blob/main/src/open_deep_research/configuration.py) 中的各字段，可自定义 Open Deep Research 的行为。
+
+### 📊 评估
+
+Open Deep Research 使用 [Deep Research Bench](https://huggingface.co/spaces/Ayanami0730/DeepResearch-Leaderboard) 进行评估。该基准包含 100 个博士级研究任务（50 个英文、50 个中文），由 22 个领域的专家设计。排行榜基于 RACE 评分，使用 LLM-as-a-judge（Gemini）对照专家编写的黄金标准报告进行评估。
+
+#### 使用方法
+
+> 警告：运行全部 100 个示例的费用约为 $20-$100，具体取决于模型选择。
+
+```bash
+# 在 LangSmith 数据集上运行评估
+python tests/run_evaluate.py
+```
+
+运行完成后，将结果提取为可提交的 JSONL 文件：
+
+```bash
+python tests/extract_langsmith_data.py --project-name "你的实验名称" --model-name "你的模型名称" --dataset-name "deep_research_bench"
+```
+
+将生成的 JSONL 文件移动到本地克隆的 Deep Research Bench 仓库，按照其 [Quick Start 指南](https://github.com/Ayanami0730/deep_research_bench?tab=readme-ov-file#quick-start)提交评估。
+
+### 🚀 部署与使用
+
+#### LangGraph Studio
+
+按照[快速开始](#-快速开始)部分启动本地 LangGraph 服务器，在 LangGraph Studio 中测试智能体。
+
+#### 托管部署
+
+可轻松部署到 [LangGraph Platform](https://langchain-ai.github.io/langgraph/concepts/#deployment-options)。
+
+#### Open Agent Platform
+
+Open Agent Platform（OAP）允许非技术用户构建和配置自己的智能体。我们已在公共演示实例上部署了 Open Deep Research，你只需添加 API 密钥即可试用：[点击这里](https://oap.langchain.com)。
+
+### 🏛️ 历史实现
+
+`src/legacy/` 文件夹包含两个早期实现，提供了不同的自动化研究方案：
+
+#### 1. 工作流实现（`legacy/graph.py`）
+- **规划-执行模式**：带人机交互规划的结构化工作流
+- **顺序处理**：逐节生成报告并进行反思
+- **交互式控制**：允许对报告计划进行反馈和审批
+
+#### 2. 多智能体实现（`legacy/multi_agent.py`）
+- **监督者-研究者架构**：协调的多智能体系统
+- **并行处理**：多个研究者同时工作
+- **MCP 支持**：广泛的模型上下文协议集成

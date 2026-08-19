@@ -1,5 +1,18 @@
 """System prompts and prompt templates for the Deep Research agent."""
 
+pre_search_prompt = """You are helping an AI research agent run a preliminary web search before deciding whether to ask the user clarifying questions.
+
+Given the user's initial research request below, generate 1-3 focused web search queries that would best anchor the research subject.
+The queries should be specific and searchable. If the request is vague, generate queries that probe the most likely interpretations so the search results reveal the subject.
+
+The user's request:
+<Messages>
+{messages}
+</Messages>
+
+Today's date is {date}.
+"""
+
 clarify_with_user_instructions="""
 These are the messages that have been exchanged so far from the user asking for the report:
 <Messages>
@@ -8,36 +21,28 @@ These are the messages that have been exchanged so far from the user asking for 
 
 Today's date is {date}.
 
-Assess whether you need to ask a clarifying question, or if the user has already provided enough information for you to start research.
-IMPORTANT: If you can see in the messages history that you have already asked a clarifying question, you almost always do not need to ask another one. Only ask another question if ABSOLUTELY NECESSARY.
+A preliminary web search has already been conducted. Here is the context gathered:
+<PreSearchContext>
+{pre_search_context}
+</PreSearchContext>
 
-If there are acronyms, abbreviations, or unknown terms, ask the user to clarify.
-If you need to ask a question, follow these guidelines:
-- Be concise while gathering all necessary information
-- Make sure to gather all the information needed to carry out the research task in a concise, well-structured manner.
-- Use bullet points or numbered lists if appropriate for clarity. Make sure that this uses markdown formatting and will be rendered correctly if the string output is passed to a markdown renderer.
-- Don't ask for unnecessary information, or information that the user has already provided. If you can see that the user has already provided the information, do not ask for it again.
+Assess the clarity of the research request across these dimensions:
+- "subject_clear": whether the research subject/topic is clearly specified ("clear", "partial", or "vague")
+- "scope_clear": whether the research scope/boundaries are clearly specified ("clear", "partial", or "vague")
+- "audience_clear": whether the target audience and depth are clear ("clear", "partial", or "vague")
+- "timeframe_clear": whether the timeframe is clear ("clear", "partial", or "vague")
+- "search_anchored": whether the pre-search results substantively anchor the subject (true/false)
+
+IMPORTANT: You do NOT decide whether to ask the user a question — the system makes that decision from your scores.
+Your only job is to score each dimension accurately, using the pre-search context to inform the scores.
+
+Then:
+- Write a "question" IF a clarifying question might genuinely be needed. It must be concise, gather all missing information in one go, and only ask for what the pre-search could not resolve. Leave it empty if no question is needed.
+- Write a "verification" message shown when research starts. If you are making assumptions (e.g. default audience, timeframe, scope), list them explicitly so the user can correct them.
+- Write a "rationale": one sentence justifying the scores.
 
 Respond in valid JSON format with these exact keys:
-"need_clarification": boolean,
-"question": "<question to ask the user to clarify the report scope>",
-"verification": "<verification message that we will start research>"
-
-If you need to ask a clarifying question, return:
-"need_clarification": true,
-"question": "<your clarifying question>",
-"verification": ""
-
-If you do not need to ask a clarifying question, return:
-"need_clarification": false,
-"question": "",
-"verification": "<acknowledgement message that you will now start research based on the provided information>"
-
-For the verification message when no clarification is needed:
-- Acknowledge that you have sufficient information to proceed
-- Briefly summarize the key aspects of what you understand from their request
-- Confirm that you will now begin the research process
-- Keep the message concise and professional
+"subject_clear", "scope_clear", "audience_clear", "timeframe_clear", "search_anchored", "question", "verification", "rationale"
 """
 
 
@@ -48,6 +53,11 @@ The messages that have been exchanged so far between yourself and the user are:
 <Messages>
 {messages}
 </Messages>
+
+A preliminary web search has already been conducted. Use it as background context to enrich the research question:
+<PreSearchContext>
+{pre_search_context}
+</PreSearchContext>
 
 Today's date is {date}.
 

@@ -10,10 +10,11 @@ from pydantic import BaseModel, Field
 
 class SearchAPI(Enum):
     """Enumeration of available search API providers."""
-    
+
     ANTHROPIC = "anthropic"
     OPENAI = "openai"
     TAVILY = "tavily"
+    DUCKDUCKGO = "duckduckgo"
     NONE = "none"
 
 class MCPConfig(BaseModel):
@@ -61,12 +62,37 @@ class Configuration(BaseModel):
             }
         }
     )
-    max_concurrent_research_units: int = Field(
-        default=5,
+    max_clarification_rounds: int = Field(
+        default=3,
         metadata={
             "x_oap_ui_config": {
                 "type": "slider",
-                "default": 5,
+                "default": 3,
+                "min": 0,
+                "max": 5,
+                "step": 1,
+                "description": "Maximum number of clarification rounds to ask the user before forcibly starting research"
+            }
+        }
+    )
+    clarification_assessment_timeout: int = Field(
+        default=60,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "number",
+                "default": 60,
+                "min": 10,
+                "max": 600,
+                "description": "Timeout in seconds for the clarification ambiguity assessment call; on timeout the agent proceeds to research with assumptions instead of hanging"
+            }
+        }
+    )
+    max_concurrent_research_units: int = Field(
+        default=2,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "slider",
+                "default": 2,
                 "min": 1,
                 "max": 20,
                 "step": 1,
@@ -74,15 +100,28 @@ class Configuration(BaseModel):
             }
         }
     )
+    max_concurrent_tool_calls: int = Field(
+        default=2,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "number",
+                "default": 2,
+                "min": 1,
+                "max": 10,
+                "description": "Maximum number of tool calls executed in parallel per researcher turn. Lower values reduce burst pressure on rate-limited search APIs (e.g. DuckDuckGo)."
+            }
+        }
+    )
     # Research Configuration
     search_api: SearchAPI = Field(
-        default=SearchAPI.TAVILY,
+        default=SearchAPI.DUCKDUCKGO,
         metadata={
             "x_oap_ui_config": {
                 "type": "select",
-                "default": "tavily",
+                "default": "duckduckgo",
                 "description": "Search API to use for research. NOTE: Make sure your Researcher Model supports the selected search API.",
                 "options": [
+                    {"label": "DuckDuckGo (免费,无需API Key)", "value": SearchAPI.DUCKDUCKGO.value},
                     {"label": "Tavily", "value": SearchAPI.TAVILY.value},
                     {"label": "OpenAI Native Web Search", "value": SearchAPI.OPENAI.value},
                     {"label": "Anthropic Native Web Search", "value": SearchAPI.ANTHROPIC.value},
@@ -119,7 +158,7 @@ class Configuration(BaseModel):
     )
     # Model Configuration
     summarization_model: str = Field(
-        default="openai:gpt-4.1-mini",
+        default="deepseek:deepseek-chat",
         metadata={
             "x_oap_ui_config": {
                 "type": "text",
@@ -151,7 +190,7 @@ class Configuration(BaseModel):
         }
     )
     research_model: str = Field(
-        default="openai:gpt-4.1",
+        default="deepseek:deepseek-chat",
         metadata={
             "x_oap_ui_config": {
                 "type": "text",
@@ -171,7 +210,7 @@ class Configuration(BaseModel):
         }
     )
     compression_model: str = Field(
-        default="openai:gpt-4.1",
+        default="deepseek:deepseek-chat",
         metadata={
             "x_oap_ui_config": {
                 "type": "text",
@@ -191,7 +230,7 @@ class Configuration(BaseModel):
         }
     )
     final_report_model: str = Field(
-        default="openai:gpt-4.1",
+        default="deepseek:deepseek-chat",
         metadata={
             "x_oap_ui_config": {
                 "type": "text",

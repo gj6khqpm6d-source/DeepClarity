@@ -1,7 +1,7 @@
 """Graph state definitions and data structures for the Deep Research agent."""
 
 import operator
-from typing import Annotated, Optional
+from typing import Annotated, Literal, Optional
 
 from langchain_core.messages import MessageLikeRepresentation
 from langgraph.graph import MessagesState
@@ -27,17 +27,43 @@ class Summary(BaseModel):
     summary: str
     key_excerpts: str
 
-class ClarifyWithUser(BaseModel):
-    """Model for user clarification requests."""
-    
-    need_clarification: bool = Field(
-        description="Whether the user needs to be asked a clarifying question.",
+class SearchQueries(BaseModel):
+    """Search queries derived from the user's initial request for the pre-search step."""
+
+    queries: list[str] = Field(
+        description="1-3 focused web search queries derived from the user's research request",
+    )
+
+class AmbiguityAssessment(BaseModel):
+    """Multi-dimension ambiguity scoring used by the clarification judgment node.
+
+    The model only *scores* the request across fixed dimensions; the node decides
+    whether to ask the user via deterministic rules on top of these scores.
+    """
+
+    subject_clear: Literal["clear", "partial", "vague"] = Field(
+        description="Whether the research subject/topic is clearly specified",
+    )
+    scope_clear: Literal["clear", "partial", "vague"] = Field(
+        description="Whether the research scope/boundaries are clearly specified",
+    )
+    audience_clear: Literal["clear", "partial", "vague"] = Field(
+        description="Whether the target audience and depth are clear",
+    )
+    timeframe_clear: Literal["clear", "partial", "vague"] = Field(
+        description="Whether the timeframe is clear",
+    )
+    search_anchored: bool = Field(
+        description="Whether the pre-search results substantively anchor the research subject",
     )
     question: str = Field(
-        description="A question to ask the user to clarify the report scope",
+        description="A clarifying question to ask the user if one is needed; empty if not needed",
     )
     verification: str = Field(
-        description="Verify message that we will start research after the user has provided the necessary information.",
+        description="A message to show when research starts, listing any assumptions made",
+    )
+    rationale: str = Field(
+        description="One sentence justifying the scores",
     )
 
 class ResearchQuestion(BaseModel):
@@ -70,6 +96,10 @@ class AgentState(MessagesState):
     raw_notes: Annotated[list[str], override_reducer] = []
     notes: Annotated[list[str], override_reducer] = []
     final_report: str
+    # Clarification judgment state: one-time pre-search context reused across
+    # clarification rounds, and a counter bounding how many times we may ask.
+    pre_search_context: Optional[str] = None
+    clarify_count: int = 0
 
 class SupervisorState(TypedDict):
     """State for the supervisor that manages research tasks."""

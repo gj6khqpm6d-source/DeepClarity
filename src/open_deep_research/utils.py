@@ -32,6 +32,86 @@ from tavily import AsyncTavilyClient
 from open_deep_research.configuration import Configuration, SearchAPI
 from open_deep_research.prompts import summarize_webpage_prompt
 from open_deep_research.state import ResearchComplete, Summary
+from open_deep_research.vector_memory import recall_from_read_content, remember
+
+logger = logging.getLogger(__name__)
+
+##########################
+# DuckDuckGo Search Tool Utils
+##########################
+
+DUCKDUCKGO_SEARCH_DESCRIPTION = (
+    "A free web search engine. "
+    "Useful for when you need to find information on the internet."
+)
+
+@tool(description=DUCKDUCKGO_SEARCH_DESCRIPTION)
+async def duckduckgo_search(
+    queries: List[str],
+    max_results: Annotated[int, InjectedToolArg] = 5,
+    config: RunnableConfig = None,
+) -> str:
+    """Fetch and summarize search results from DuckDuckGo.
+
+    DuckDuckGo is free and keyless, so it rate-limits by IP: a rate-limited query
+    fails fast (HTTP 202 -> RatelimitException). We catch the failure per query so
+    one bad query doesn't discard the rest, and raise ToolException only when ALL
+    queries fail so each caller can apply its own policy (pre-search retries with
+    backoff, research fast-skips). See ISSUES.md 修复 #3.
+
+    Args:
+        queries: List of search queries to execute
+        max_results: Maximum number of results to return per query
+
+    Returns:
+        Formatted string containing search results
+    """
+    from duckduckgo_search import DDGS
+    from duckduckgo_search.exceptions import DuckDuckGoSearchException
+
+    all_results = []
+    failed_queries = 0
+    # timeout=5 bounds each HTTP request so a blackholed DDG can't hang the flow.
+    with DDGS(timeout=5) as ddgs:
+        for query in queries:
+            try:
+                results = list(ddgs.text(query, max_results=max_results))
+                all_results.append({"query": query, "results": results})
+            except DuckDuckGoSearchException as e:
+                failed_queries += 1
+                logger.warning(f"DuckDuckGo search failed for query '{query}': {e}")
+                all_results.append({"query": query, "results": []})
+
+    if queries and failed_queries == len(queries):
+        # Total failure (most often rate limiting). Raise so the failure is visible
+        # to the caller: pre-search's retry/give-up logic runs, and the research
+        # phase surfaces the reason to the agent instead of pretending success.
+        raise ToolException(
+            "DuckDuckGo search failed for all queries "
+            "(likely rate limited: 202 Ratelimit). Wait a moment and retry, "
+            "or switch SEARCH_API to tavily."
+        )
+
+    output_parts = ["Search results:\n"]
+    source_num = 0
+    for response in all_results:
+        for result in response["results"]:
+            source_num += 1
+            # Remember what we found into the thread's vector memory (best-effort)
+            # so later rounds can semantically re-consult it (vector_memory.py).
+            await remember(
+                config,
+                text=f"{result.get('title', '')}\n{result.get('body', '')}",
+                url=result.get("href", ""),
+                title=result.get("title", ""),
+            )
+            output_parts.append(f"\n--- SOURCE {source_num}: {result.get('title', 'No title')} ---")
+            output_parts.append(f"URL: {result.get('href', 'No URL')}")
+            output_parts.append(f"\n{result.get('body', 'No content')}\n")
+            output_parts.append("-" * 80)
+
+    return "\n".join(output_parts)
+
 
 ##########################
 # Tavily Search Tool Utils
@@ -80,6 +160,18 @@ async def tavily_search(
     
     # Character limit to stay within model token limits (configurable)
     max_char_to_include = configurable.max_content_length
+
+    # Remember the fetched page bodies into the thread's vector memory (best-effort)
+    # so later rounds can semantically re-consult full originals (vector_memory.py).
+    for result in unique_results.values():
+        raw = (result.get("raw_content") or "").strip()
+        if raw:
+            await remember(
+                config,
+                text=raw[:max_char_to_include],
+                url=result["url"],
+                title=result.get("title", ""),
+            )
     
     # Initialize summarization model with retry logic
     model_api_key = get_api_key_for_model(configurable.summarization_model, config)
@@ -553,12 +645,22 @@ async def get_search_tool(search_api: SearchAPI):
         # Configure Tavily search tool with metadata
         search_tool = tavily_search
         search_tool.metadata = {
-            **(search_tool.metadata or {}), 
-            "type": "search", 
+            **(search_tool.metadata or {}),
+            "type": "search",
             "name": "web_search"
         }
         return [search_tool]
-        
+
+    elif search_api == SearchAPI.DUCKDUCKGO:
+        # Configure DuckDuckGo search tool with metadata
+        search_tool = duckduckgo_search
+        search_tool.metadata = {
+            **(search_tool.metadata or {}),
+            "type": "search",
+            "name": "web_search"
+        }
+        return [search_tool]
+
     elif search_api == SearchAPI.NONE:
         # No search functionality configured
         return []
@@ -576,7 +678,7 @@ async def get_all_tools(config: RunnableConfig):
         List of all configured and available tools for research operations
     """
     # Start with core research tools
-    tools = [tool(ResearchComplete), think_tool]
+    tools = [tool(ResearchComplete), think_tool, recall_from_read_content]
     
     # Add configured search tools
     configurable = Configuration.from_runnable_config(config)
@@ -684,6 +786,8 @@ def is_token_limit_exceeded(exception: Exception, model_name: str = None) -> boo
             provider = 'anthropic'
         elif model_str.startswith('gemini:') or model_str.startswith('google:'):
             provider = 'gemini'
+        elif model_str.startswith('deepseek:'):
+            provider = 'deepseek'
     
     # Step 2: Check provider-specific token limit patterns
     if provider == 'openai':
@@ -692,12 +796,15 @@ def is_token_limit_exceeded(exception: Exception, model_name: str = None) -> boo
         return _check_anthropic_token_limit(exception, error_str)
     elif provider == 'gemini':
         return _check_gemini_token_limit(exception, error_str)
+    elif provider == 'deepseek':
+        return _check_deepseek_token_limit(exception, error_str)
     
     # Step 3: If provider unknown, check all providers
     return (
         _check_openai_token_limit(exception, error_str) or
         _check_anthropic_token_limit(exception, error_str) or
-        _check_gemini_token_limit(exception, error_str)
+        _check_gemini_token_limit(exception, error_str) or
+        _check_deepseek_token_limit(exception, error_str)
     )
 
 def _check_openai_token_limit(exception: Exception, error_str: str) -> bool:
@@ -762,26 +869,47 @@ def _check_gemini_token_limit(exception: Exception, error_str: str) -> bool:
     exception_type = str(type(exception))
     class_name = exception.__class__.__name__
     module_name = getattr(exception.__class__, '__module__', '')
-    
+
     # Check if this is a Google/Gemini exception
     is_google_exception = (
-        'google' in exception_type.lower() or 
+        'google' in exception_type.lower() or
         'google' in module_name.lower()
     )
-    
+
     # Check for Google-specific resource exhaustion errors
     is_resource_exhausted = class_name in [
-        'ResourceExhausted', 
+        'ResourceExhausted',
         'GoogleGenerativeAIFetchError'
     ]
-    
+
     if is_google_exception and is_resource_exhausted:
         return True
-    
+
     # Check for specific Google API resource exhaustion patterns
     if 'google.api_core.exceptions.resourceexhausted' in exception_type.lower():
         return True
-    
+
+    return False
+
+def _check_deepseek_token_limit(exception: Exception, error_str: str) -> bool:
+    """Check if exception indicates DeepSeek token limit exceeded.
+
+    DeepSeek uses an OpenAI-compatible API, so errors may resemble OpenAI format.
+    """
+    # Check for token-related keywords in error string
+    token_keywords = ['token', 'context', 'length', 'maximum context', 'reduce']
+    if any(keyword in error_str for keyword in token_keywords):
+        return True
+
+    # Check for specific error codes (OpenAI-compatible format)
+    if hasattr(exception, 'code') and hasattr(exception, 'type'):
+        error_code = getattr(exception, 'code', '')
+        error_type = getattr(exception, 'type', '')
+
+        if (error_code == 'context_length_exceeded' or
+            error_type == 'invalid_request_error'):
+            return True
+
     return False
 
 # NOTE: This may be out of date or not applicable to your models. Please update this as needed.
@@ -826,6 +954,8 @@ MODEL_TOKEN_LIMITS = {
     "bedrock:us.anthropic.claude-sonnet-4-20250514-v1:0": 200000,
     "bedrock:us.anthropic.claude-opus-4-20250514-v1:0": 200000,
     "anthropic.claude-opus-4-1-20250805-v1:0": 200000,
+    "deepseek:deepseek-chat": 128000,
+    "deepseek:deepseek-reasoner": 128000,
 }
 
 def get_model_token_limit(model_string):
@@ -903,14 +1033,18 @@ def get_api_key_for_model(model_name: str, config: RunnableConfig):
             return api_keys.get("ANTHROPIC_API_KEY")
         elif model_name.startswith("google"):
             return api_keys.get("GOOGLE_API_KEY")
+        elif model_name.startswith("deepseek:"):
+            return api_keys.get("DEEPSEEK_API_KEY")
         return None
     else:
-        if model_name.startswith("openai:"): 
+        if model_name.startswith("openai:"):
             return os.getenv("OPENAI_API_KEY")
         elif model_name.startswith("anthropic:"):
             return os.getenv("ANTHROPIC_API_KEY")
         elif model_name.startswith("google"):
             return os.getenv("GOOGLE_API_KEY")
+        elif model_name.startswith("deepseek:"):
+            return os.getenv("DEEPSEEK_API_KEY")
         return None
 
 def get_tavily_api_key(config: RunnableConfig):

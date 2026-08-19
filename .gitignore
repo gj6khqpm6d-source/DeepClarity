@@ -18,6 +18,27 @@ lib/
 lib64/
 parts/
 sdist/
+wheels/
+*.egg
+
+# Environment secrets — NEVER commit
+.env
+.env.local
+.env.*.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test artifacts (temporary)
+_flakiness_test.py
+
 var/
 wheels/
 *.egg-info/

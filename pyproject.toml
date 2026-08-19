@@ -44,6 +44,9 @@ dependencies = [
     "mcp>=1.9.4",
     "langchain-aws>=0.2.28",
     "pandas>=2.3.1",
+    "streamlit>=1.61.1",
+    "numpy>=1.26",
+    "fastembed>=0.8.0",
 ]
 
 [project.optional-dependencies]
