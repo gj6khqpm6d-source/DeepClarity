@@ -61,8 +61,8 @@ Deep research has broken out as one of the most popular agent applications. This
 
 1. Clone the repository and activate a virtual environment:
 ```bash
-git clone https://github.com/langchain-ai/open_deep_research.git
-cd open_deep_research
+git clone https://github.com/gj6khqpm6d-source/DeepClarity.git
+cd DeepClarity
 uv venv
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 ```
@@ -201,8 +201,8 @@ Open Deep Research 是一个简单、可配置、完全开源的深度研究智�
 
 1. 克隆仓库并激活虚拟环境：
 ```bash
-git clone https://github.com/langchain-ai/open_deep_research.git
-cd open_deep_research
+git clone https://github.com/gj6khqpm6d-source/DeepClarity.git
+cd DeepClarity
 uv venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
 ```
