@@ -1,46 +1,46 @@
 # 🔬 DeepClarity
 
-**预搜索锚定的防循环深度研究 Agent**
+**Pre-search anchored deep research agent with deterministic clarification and layered fault tolerance.**
 
-> 面向真实网络环境的深度研究智能体。核心改进:用"预搜索锚定 + 五维打分 + 代码决策"替代上游的"LLM 自判追问",彻底消除澄清死循环;叠加六层容错确保任何故障下流程不挂起。
+> A deep research agent built for real-world network conditions. Core innovation: replaces upstream's LLM self-judgment (which causes clarification dead loops) with pre-search anchoring + five-dimension scoring + code-based decision rules. Layered fault tolerance ensures the system never hangs regardless of API failures.
 
 ---
 
-## 核心设计:LLM 打分,代码决策
+## Core Design: LLM Scores, Code Decides
 
 ```mermaid
 flowchart TD
-    START((用户提问)) --> PRE[预搜索<br/>LLM生成查询→程序化搜索→压缩]
-    PRE --> SCORE[五维打分<br/>subject/scope/audience/timeframe<br/>+ search_anchored]
-    SCORE -->|subject=vague| ASK[追问用户]
+    START((User Query)) --> PRE[Pre-Search<br/>LLM generates queries → programmatic search → compress ≤12k chars]
+    PRE --> SCORE[Five-Dimension Scoring<br/>subject / scope / audience / timeframe<br/>+ search_anchored]
+    SCORE -->|subject vague| ASK[Ask User]
     ASK --> SCORE
-    SCORE -->|有锚定或维度清晰| BRIEF[研究简报]
-    BRIEF --> SUPER[supervisor拆任务]
-    SUPER --> R1[researcher_1] & R2[researcher_2<br/>Semaphore限流]
-    R1 & R2 --> COMP[压缩发现]
-    COMP -->|迭代未满| SUPER
-    COMP -->|完成| REPORT[最终报告]
-    REPORT --> MEM[清空向量记忆] --> END((结束))
+    SCORE -->|anchored or dimensions clear| BRIEF[Research Brief]
+    BRIEF --> SUPER[Supervisor: Task Decomposition]
+    SUPER --> R1[Researcher 1] & R2[Researcher 2<br/>Semaphore Rate-Limited]
+    R1 & R2 --> COMP[Compress Findings]
+    COMP -->|more iterations| SUPER
+    COMP -->|done| REPORT[Final Report]
+    REPORT --> MEM[Clear Vector Memory] --> END((End))
 ```
 
-**预搜索**不是"研究前先搜一遍"——它是**决策的第五维**:LLM 生成 1-3 条查询做程序化预搜,搜到的内容压缩后变成布尔值 `search_anchored`(预搜索能否锚定主题),与前四维(主题/边界/受众/时间范围)一起输入确定性规则,**代码决定问不问**,而非让 LLM 自判。
+**Pre-search is not "search before research"** — it is the **fifth dimension of the clarification decision**. LLM generates 1-3 queries and searches programmatically; the compressed results become a boolean `search_anchored` (can the pre-search anchor the topic?), combined with four other dimensions (subject/scope/audience/timeframe) to feed deterministic rules. **Code decides whether to ask, not the LLM.**
 
-## 相对上游 open-deep-research 的改进
+## Key Improvements over Upstream open-deep-research
 
-| 改进 | 上游问题 | DeepClarity 方案 |
-|------|----------|-----------------|
-| **澄清判断** | LLM 自判要不要问→死循环 | 预搜索锚定 + 五维打分 + 代码规则 + 3 轮硬上限 |
-| **状态持久化** | 本地直调无 checkpointer→每轮失忆 | `MemorySaver` 多轮状态真实累积 |
-| **搜索限流** | DDG 限流时静默失败 | 预搜索重试 + 研究单查询级容错 + 最坏降级 |
-| **评估超时** | LLM 调用无超时→静默挂起 | 60s 超时→按假设推进 |
-| **并发控制** | 研究突发打满搜索 API | `max_concurrent_research_units` + `asyncio.Semaphore` |
-| **追问收敛** | 次维度模糊每轮追问 | 已答一轮后仅 subject 模糊才问 |
-| **向量记忆** | 摘要即终点,无法回看原文 | 边读边 embed,`recall_from_read_content` 语义回看 |
-| **成本追踪** | 无 | 进程内回调 + cc-switch 代理级日志 |
+| Improvement | Upstream Problem | DeepClarity Solution |
+|-------------|-----------------|---------------------|
+| **Clarification judgment** | LLM self-decides → dead loops | Pre-search anchoring + 5-dim scoring + code rules + 3-round cap |
+| **State persistence** | No checkpointer locally → forgets everything | `MemorySaver` for multi-turn persistence |
+| **Rate-limit tolerance** | Silent failure on DDG limits | Pre-search retry + per-query research tolerance + worst-case degradation |
+| **Assessment timeout** | LLM calls hang forever → silent UI | 60s timeout → proceed with assumptions |
+| **Concurrency control** | Burst requests saturate search API | `max_concurrent_research_units` + `asyncio.Semaphore` |
+| **Clarification convergence** | Re-asks on secondary dimensions after answer | Only re-asks if subject is still vague after user answered |
+| **Vector memory** | Summary-only, no re-consultation | Embed on fetch; `recall_from_read_content` for semantic re-consultation |
+| **Cost tracking** | None | In-process callback + cc-switch proxy-level logs |
 
-详见 [docs/improvements-and-advantages.md](docs/improvements-and-advantages.md)
+See [docs/improvements-and-advantages.md](docs/improvements-and-advantages.md) for full details.
 
-## 快速开始
+## Quick Start
 
 ```bash
 git clone https://github.com/gj6khqpm6d-source/DeepClarity.git
@@ -49,63 +49,121 @@ uv venv && source .venv/bin/activate
 uv sync
 ```
 
-配置环境变量:
+Configure environment:
 ```bash
 cp .env.example .env
-# 编辑 .env,设置模型和搜索 API
+# Edit .env: set model and search API
 ```
 
-启动本地 UI:
+Launch local UI:
 ```bash
 streamlit run app.py
 ```
 
-默认使用 `deepseek:deepseek-chat` + DuckDuckGo。推荐切换到 Tavily(免费档 1000 次/月):
+Default: `deepseek:deepseek-chat` + DuckDuckGo. Recommended: switch to Tavily (free tier, 1000 queries/month):
+```
+SEARCH_API=tavily
+TAVILY_API_KEY=your_key
+```
+
+## Five-Layer Evaluation Framework
+
+| Layer | Score | Status |
+|-------|-------|--------|
+| 1. Task Completion | 40% | 100% report generation + termination guarantee; needs fixed regression set |
+| 2. Output Quality | 30% | LLM-as-Judge infrastructure ready; 2 queries scored 4-5/5 |
+| 3. Efficiency & Cost | 60% | Dual-layer tracking (in-process + cc-switch proxy) |
+| 4. Robustness | **90%** | 6 fixes + fault injection testing; strongest layer |
+| 5. Safety & Alignment | 10% | Vector memory has source tracing; prompt injection not tested |
+
+See [docs/eval-framework.md](docs/eval-framework.md) | Results: [eval_results.json](eval_results.json)
+
+## Project Structure
+
+```
+src/open_deep_research/
+  deep_researcher.py    # Core graph: judgment / research / report
+  configuration.py      # All config fields
+  state.py              # State definitions + AmbiguityAssessment
+  prompts.py            # System prompts
+  utils.py              # Search tools + recall registration
+  vector_memory.py      # Vector memory (fastembed + bge-small-zh)
+
+app.py                  # Streamlit multi-turn chat UI
+eval_fork.py            # Eval script (auto-pulls cc-switch costs)
+cost_tracker.py         # In-process token tracking
+docs/
+  improvements-and-advantages.md  # Improvement record + competitive analysis
+  eval-framework.md               # Five-layer evaluation framework
+ISSUES.md               # Root cause / solution / verification / pitfalls for every fix
+```
+
+## Tech Stack
+
+- **Framework**: LangGraph + LangChain
+- **Models**: deepseek:deepseek-chat (swappable: OpenAI / Anthropic / Google / Groq)
+- **Search**: Tavily (recommended) / DuckDuckGo / Native search / None
+- **Vector Memory**: fastembed + BAAI/bge-small-zh-v1.5 (local, zero API cost)
+- **Local Proxy**: cc-switch (tool_use format translation)
+- **UI**: Streamlit
+
+## License
+
+MIT
+
+---
+
+# 🔬 DeepClarity（中文）
+
+**预搜索锚定的防循环深度研究 Agent**
+
+> 面向真实网络环境的深度研究智能体。核心改进:用"预搜索锚定 + 五维打分 + 代码决策"替代上游的"LLM 自判追问",彻底消除澄清死循环;六层容错确保任何故障下流程不挂起。
+
+## 核心设计
+
+**预搜索不是"研究前先搜一遍"**——它是**决策的第五维**:LLM 生成查询做程序化预搜,搜到的内容压缩后变成布尔值 `search_anchored`(能否锚定主题),与前四维(主题/边界/受众/时间范围)一起输入确定性规则,**代码决定问不问**,而非让 LLM 自判。
+
+## 相对上游的改进
+
+| 改进 | 上游问题 | DeepClarity 方案 |
+|------|----------|-----------------|
+| 澄清判断 | LLM 自判→死循环 | 预搜索锚定+五维打分+代码规则+3轮硬上限 |
+| 状态持久化 | 本地无 checkpointer→失忆 | MemorySaver 多轮累积 |
+| 搜索限流 | DDG 限流时静默失败 | 分层重试+单查询容错+最坏降级 |
+| 评估超时 | LLM 调用无超时→静默挂起 | 60s 超时→按假设推进 |
+| 并发控制 | 研究突发打满搜索 API | Semaphore 限流 |
+| 追问收敛 | 次维度模糊每轮追问 | 已答后仅 subject 模糊才问 |
+| 向量记忆 | 摘要即终点 | 边读边 embed,语义回看 |
+| 成本追踪 | 无 | 双层追踪(进程内+cc-switch) |
+
+## 快速开始
+
+```bash
+git clone https://github.com/gj6khqpm6d-source/DeepClarity.git
+cd DeepClarity
+uv venv && source .venv/bin/activate
+uv sync
+cp .env.example .env   # 编辑 .env 设置模型和搜索 API
+streamlit run app.py   # 启动本地 UI
+```
+
+推荐切换到 Tavily(免费档 1000 次/月):
 ```
 SEARCH_API=tavily
 TAVILY_API_KEY=你的key
 ```
 
-## 五层评估框架
+## 五层评估
 
 | 层 | 评分 | 说明 |
 |----|------|------|
-| 1. 任务完成 | 40% | 100% 出报告 + 终止保证;缺固定回归集 |
-| 2. 输出质量 | 30% | LLM-as-Judge 基建到位;2 查询 4-5/5 |
+| 1. 任务完成 | 40% | 100%出报告+终止保证;缺固定回归集 |
+| 2. 输出质量 | 30% | LLM-as-Judge 基建到位;2查询4-5/5 |
 | 3. 效率成本 | 60% | 双层追踪(进程内+cc-switch) |
-| 4. 鲁棒性 | **90%** | 6 修复 + 故障注入测试 |
+| 4. 鲁棒性 | **90%** | 6修复+故障注入测试 |
 | 5. 安全对齐 | 10% | 向量记忆有溯源;prompt injection 未做 |
 
-详见 [docs/eval-framework.md](docs/eval-framework.md) | 评估数据见 [eval_results.json](eval_results.json)
-
-## 项目结构
-
-```
-src/open_deep_research/
-  deep_researcher.py    # 核心图:判断/研究/报告
-  configuration.py      # 所有配置项
-  state.py              # 状态定义 + AmbiguityAssessment
-  prompts.py            # 系统提示词
-  utils.py              # 搜索工具 + recall 注册
-  vector_memory.py      # 向量记忆(fastembed + bge-small-zh)
-
-app.py                  # Streamlit 多轮对话 UI
-eval_fork.py            # 评估脚本(自动拉 cc-switch 成本)
-cost_tracker.py         # 进程内 token 追踪
-docs/
-  improvements-and-advantages.md  # 改进记录 + 竞争优势
-  eval-framework.md               # 五层评估框架
-ISSUES.md               # 每个修复的根因/方案/验证/陷阱
-```
-
-## 技术栈
-
-- **框架**:LangGraph + LangChain
-- **模型**:deepseek:deepseek-chat(可换 OpenAI/Anthropic/Google/Groq)
-- **搜索**:Tavily(推荐) / DuckDuckGo / 原生搜索 / 无搜索
-- **向量记忆**:fastembed + BAAI/bge-small-zh-v1.5(本地,零 API 费)
-- **本地代理**:cc-switch(支持 tool_use 格式转换)
-- **UI**:Streamlit
+详见 [docs/eval-framework.md](docs/eval-framework.md) | 评估数据:[eval_results.json](eval_results.json)
 
 ## License
 
