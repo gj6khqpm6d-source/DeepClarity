@@ -1,170 +1,266 @@
-# 🔬 DeepClarity
+<div align="center">
 
-**Pre-search anchored deep research agent with deterministic clarification and layered fault tolerance.**
+<h1>DeepClarity</h1>
 
-> A deep research agent built for real-world network conditions. Core innovation: replaces upstream's LLM self-judgment (which causes clarification dead loops) with pre-search anchoring + five-dimension scoring + code-based decision rules. Layered fault tolerance ensures the system never hangs regardless of API failures.
+<h3>Build the runtime around the model—not just a prompt around the API.</h3>
+
+<p>DeepClarity is a multi-turn deep-research agent runtime for bounded context, structured memory, task-aware tools, fault-tolerant orchestration, and replayable evaluation.</p>
+
+<p><a href="README.zh-CN.md">简体中文</a> · <strong>English</strong></p>
+
+<p>
+  <img src="https://img.shields.io/badge/Python-3.11-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.11" />
+  <img src="https://img.shields.io/badge/LangGraph-Agent%20Runtime-1C3C3C?style=for-the-badge" alt="LangGraph" />
+  <img src="https://img.shields.io/badge/Streamlit-Local%20UI-FF4B4B?style=for-the-badge&logo=streamlit&logoColor=white" alt="Streamlit" />
+  <img src="https://img.shields.io/badge/DeepSeek-Model-5B5BD6?style=for-the-badge" alt="DeepSeek" />
+</p>
+
+<p><a href="#design-process">Design process</a> · <a href="#architecture">Architecture</a> · <a href="#quick-start">Quick start</a> · <a href="#evaluation-evidence">Evaluation</a> · <a href="#interview-walkthrough">Interview walkthrough</a></p>
+
+</div>
 
 ---
 
-## Core Design: LLM Scores, Code Decides
+<p align="center">
+  <img src="docs/images/deepclarity-demo.gif" alt="DeepClarity workflow preview: clarification, parallel research, context memory, and cited report" width="960" />
+  <br />
+  <sub>Workflow preview: clarification, parallel research, context control, and a cited report.</sub>
+</p>
+
+## Why this project
+
+A deep-research agent is not only an LLM call. It must decide when to ask a question, coordinate tools and sub-agents, keep context within a budget, survive rate limits and timeouts, and provide evidence that can be inspected after a run.
+
+DeepClarity is a local Streamlit fork of open-deep-research that treats those concerns as runtime components:
+
+- deterministic clarification instead of an LLM-controlled question loop;
+- a supervisor and bounded researcher loops;
+- task/session memory with retrieve-then-load evidence;
+- context editing and observation masking;
+- cached, task-aware MCP tool selection;
+- deadlines, retry budgets, concurrency limits, and partial-failure isolation;
+- metadata-only telemetry, replay fixtures, and Auto-RCA;
+- offline regression plus a deliberately small online pilot.
+
+The project does not claim completed SFT, DPO, RLHF, or production-scale multilingual deployment. Those are future extensions, not hidden accomplishments.
+
+## Design process
+
+The implementation follows a failure-mode-first process.
+
+### 1. Define runtime invariants
+
+The runtime should:
+
+1. terminate clarification;
+2. preserve state across turns;
+3. bound model, tool, context, retry, and concurrency budgets;
+4. keep useful sibling work when one sub-agent fails;
+5. recover precise evidence without injecting all old observations;
+6. make latency, errors, and replay state inspectable without logging secrets.
+
+### 2. Convert failure modes into policy
+
+| Failure mode | Runtime policy | Implementation |
+|---|---|---|
+| Ambiguous requests cause repeated questions | LLM scores ambiguity; deterministic code decides | Pre-search anchoring + five-dimension rules |
+| Search providers stall or rate-limit | Deadline, capped retry, per-query tolerance, fallback | Search utilities and graph nodes |
+| Research history exceeds context budget | Mask old observations and retrieve evidence just in time | Context engine + vector memory |
+| Large MCP inventories waste context | Cache inventory and bind task-relevant top-k tools | Tool registry and task-aware search |
+| A researcher fails in parallel execution | Return a recoverable observation and keep successful siblings | Supervisor orchestration |
+| A run is hard to reproduce | Record metadata-only events and replay tool behavior | Telemetry + ReplayEnvironment |
+
+### 3. Separate model policy from runtime mechanism
+
+The model proposes queries, scores ambiguity, decomposes research, and chooses tools. The runtime owns decisions that must remain bounded and auditable: whether to ask, when to stop, how much context to expose, how many retries to allow, and how much concurrency to permit.
+
+> **The LLM scores and plans; code enforces budgets and termination.**
+
+### 4. Verify in layers
+
+- deterministic tests for rules, context, memory, safety, tool search, and replay;
+- retrieval smoke evaluation;
+- fake-tool timeout, rate-limit, authentication, injection, and concurrency tests;
+- a three-task online pilot with two English and one Chinese task;
+- judge calibration infrastructure with explicit evidence boundaries.
+
+## Architecture
 
 ```mermaid
 flowchart TD
-    START((User Query)) --> PRE[Pre-Search<br/>LLM generates queries → programmatic search → compress ≤12k chars]
-    PRE --> SCORE[Five-Dimension Scoring<br/>subject / scope / audience / timeframe<br/>+ search_anchored]
-    SCORE -->|subject vague| ASK[Ask User]
-    ASK --> SCORE
-    SCORE -->|anchored or dimensions clear| BRIEF[Research Brief]
-    BRIEF --> SUPER[Supervisor: Task Decomposition]
-    SUPER --> R1[Researcher 1] & R2[Researcher 2<br/>Semaphore Rate-Limited]
-    R1 & R2 --> COMP[Compress Findings]
-    COMP -->|more iterations| SUPER
-    COMP -->|done| REPORT[Final Report]
-    REPORT --> MEM[Clear Vector Memory] --> END((End))
+    U[User query] --> C[Clarification gate]
+    C --> P[One-time pre-search]
+    P --> S[Five-dimension scoring]
+    S -->|subject vague| Q[Bounded clarification]
+    Q --> S
+    S -->|clear or safely assumable| B[Research brief]
+    B --> SUP[Supervisor]
+    SUP --> R1[Researcher A]
+    SUP --> R2[Researcher B]
+    R1 --> T1[Search / MCP / memory]
+    R2 --> T2[Search / MCP / memory]
+    T1 --> X1[Context compaction]
+    T2 --> X2[Context compaction]
+    X1 --> SUP
+    X2 --> SUP
+    SUP -->|complete or budget reached| F[Final report]
+    F --> M[Promote compact outcome to session memory]
+    M --> E[Trace / replay / Auto-RCA]
 ```
 
-**Pre-search is not "search before research"** — it is the **fifth dimension of the clarification decision**. LLM generates 1-3 queries and searches programmatically; the compressed results become a boolean `search_anchored` (can the pre-search anchor the topic?), combined with four other dimensions (subject/scope/audience/timeframe) to feed deterministic rules. **Code decides whether to ask, not the LLM.**
+### Clarification gate
 
-## Key Improvements over Upstream open-deep-research
+The first request can trigger one pre-search. The model generates 1–3 focused queries, the search tool returns evidence, and the result is compacted into bounded context. A structured model call scores subject, scope, audience, timeframe, and search anchoring.
 
-| Improvement | Upstream Problem | DeepClarity Solution |
-|-------------|-----------------|---------------------|
-| **Clarification judgment** | LLM self-decides → dead loops | Pre-search anchoring + 5-dim scoring + code rules + 3-round cap |
-| **State persistence** | No checkpointer locally → forgets everything | `MemorySaver` for multi-turn persistence |
-| **Rate-limit tolerance** | Silent failure on DDG limits | Pre-search retry + per-query research tolerance + worst-case degradation |
-| **Assessment timeout** | LLM calls hang forever → silent UI | 60s timeout → proceed with assumptions |
-| **Concurrency control** | Burst requests saturate search API | `max_concurrent_research_units` + `asyncio.Semaphore` |
-| **Clarification convergence** | Re-asks on secondary dimensions after answer | Only re-asks if subject is still vague after user answered |
-| **Vector memory** | Summary-only, no re-consultation | Embed on fetch; `recall_from_read_content` for semantic re-consultation |
-| **Cost tracking** | None | In-process callback + cc-switch proxy-level logs |
+Code then applies auditable rules: a vague subject must be clarified; multiple vague secondary dimensions require a question only when the topic is not anchored; a single missing dimension becomes an explicit assumption; and a hard clarification cap guarantees termination.
 
-See [docs/improvements-and-advantages.md](docs/improvements-and-advantages.md) for full details.
+### Research, tools, context, and safety
 
-## Quick Start
+The supervisor decomposes a brief into focused units. Independent units run concurrently within a configured budget. Each researcher runs a bounded model–tool loop, limits parallel tool calls with a semaphore, compresses evidence, and returns a concise result plus raw notes.
+
+MCP endpoints are normalized into a multi-server inventory, cached, filtered by allowlists, and ranked locally against the task so only relevant tools are bound.
+
+DeepClarity maintains two history views:
+
+- **Replay state:** complete graph state and tool-call structure.
+- **Model-facing context:** a bounded view with old observations masked when needed.
+
+Evidence notes are deduplicated in task/session scopes. After a successful report, the compact outcome can be promoted to session memory while raw task evidence is cleared. Web, MCP, and memory text are treated as untrusted observations, and English/Chinese injection patterns are flagged.
+
+## Features
+
+| | Capability | What it demonstrates |
+|:--:|---|---|
+| 🧭 | **Deterministic clarification** | Pre-search anchoring, structured ambiguity scoring, code-enforced termination |
+| 🧠 | **Context engineering** | Context budgets, observation masking, source-preserving compaction |
+| 🗂️ | **Structured memory** | Task/session notes, deduplication, lifecycle promotion, JIT retrieval |
+| 🧰 | **Tool runtime** | Multi-server MCP cache, task-aware top-k search, concurrency control |
+| 🕸️ | **Multi-agent orchestration** | Supervisor decomposition, parallel researchers, bounded ReAct loops |
+| 🛡️ | **Fault tolerance** | Deadlines, retries, rate-limit handling, partial-failure isolation |
+| 📏 | **Evaluation** | Replay, fault injection, Auto-RCA, judge calibration, retrieval smoke tests |
+| 📊 | **Telemetry** | Component duration, status, error category, context reduction, trace export |
+| 💬 | **Local product surface** | Streamlit multi-turn chat with progress, report, and diagnostics |
+
+## Quick start
+
+Requirements: Python 3.11 and uv.
 
 ```bash
-git clone https://github.com/gj6khqpm6d-source/DeepClarity.git
-cd DeepClarity
-uv venv && source .venv/bin/activate
+uv venv
+source .venv/bin/activate
 uv sync
 ```
 
-Configure environment:
-```bash
-cp .env.example .env
-# Edit .env: set model and search API
+Create .env from .env.example only if it does not already exist. For direct DeepSeek use:
+
+```dotenv
+RESEARCH_MODEL=deepseek:deepseek-chat
+SUMMARIZATION_MODEL=deepseek:deepseek-chat
+COMPRESSION_MODEL=deepseek:deepseek-chat
+FINAL_REPORT_MODEL=deepseek:deepseek-chat
+DEEPSEEK_API_KEY=your-key
+SEARCH_API=duckduckgo
 ```
 
-Launch local UI:
+Launch the local UI:
+
 ```bash
 streamlit run app.py
 ```
 
-Default: `deepseek:deepseek-chat` + DuckDuckGo. Recommended: switch to Tavily (free tier, 1000 queries/month):
-```
-SEARCH_API=tavily
-TAVILY_API_KEY=your_key
-```
+Open <http://127.0.0.1:8501>. The first live run can be slow because it includes multiple model/tool round trips and may download the local embedding model. The UI reports node-level progress; a complete online result is required before quoting latency or quality numbers.
 
-## Five-Layer Evaluation Framework
+## Evaluation evidence
 
-| Layer | Score | Status |
-|-------|-------|--------|
-| 1. Task Completion | 40% | 100% report generation + termination guarantee; needs fixed regression set |
-| 2. Output Quality | 30% | LLM-as-Judge infrastructure ready; 2 queries scored 4-5/5 |
-| 3. Efficiency & Cost | 60% | Dual-layer tracking (in-process + cc-switch proxy) |
-| 4. Robustness | **90%** | 6 fixes + fault injection testing; strongest layer |
-| 5. Safety & Alignment | 10% | Vector memory has source tracing; prompt injection not tested |
+| Layer | Current evidence | Boundary |
+|---|---|---|
+| Offline regression | Latest local run: 41 tests passed | Does not measure live model quality |
+| Retrieval smoke test | 15 synthetic chunks and 10 labeled queries; Recall@5 and hit rate are emitted | Small regression fixture, not production traffic |
+| Fault injection | 20 fake-tool cases; concurrency checked with 20 calls at levels 1, 2, and 4 | No real provider load test |
+| Online pilot | Three versioned tasks: two English and one Chinese | No success/latency claim until a successful artifact is captured |
+| Judge calibration | Exact agreement, weighted kappa, and Spearman metrics are implemented | Example labels are not human agreement evidence |
+| Runtime signals | Model/tool duration, error status, context reduction, token callback | P50/P95 and cost need a larger controlled run |
 
-See [docs/eval-framework.md](docs/eval-framework.md) | Results: [eval_results.json](eval_results.json)
-
-## Project Structure
-
-```
-src/open_deep_research/
-  deep_researcher.py    # Core graph: judgment / research / report
-  configuration.py      # All config fields
-  state.py              # State definitions + AmbiguityAssessment
-  prompts.py            # System prompts
-  utils.py              # Search tools + recall registration
-  vector_memory.py      # Vector memory (fastembed + bge-small-zh)
-
-app.py                  # Streamlit multi-turn chat UI
-eval_fork.py            # Eval script (auto-pulls cc-switch costs)
-cost_tracker.py         # In-process token tracking
-docs/
-  improvements-and-advantages.md  # Improvement record + competitive analysis
-  eval-framework.md               # Five-layer evaluation framework
-ISSUES.md               # Root cause / solution / verification / pitfalls for every fix
-```
-
-## Tech Stack
-
-- **Framework**: LangGraph + LangChain
-- **Models**: deepseek:deepseek-chat (swappable: OpenAI / Anthropic / Google / Groq)
-- **Search**: Tavily (recommended) / DuckDuckGo / Native search / None
-- **Vector Memory**: fastembed + BAAI/bge-small-zh-v1.5 (local, zero API cost)
-- **Local Proxy**: cc-switch (tool_use format translation)
-- **UI**: Streamlit
-
-## License
-
-MIT
-
----
-
-# 🔬 DeepClarity（中文）
-
-**预搜索锚定的防循环深度研究 Agent**
-
-> 面向真实网络环境的深度研究智能体。核心改进:用"预搜索锚定 + 五维打分 + 代码决策"替代上游的"LLM 自判追问",彻底消除澄清死循环;六层容错确保任何故障下流程不挂起。
-
-## 核心设计
-
-**预搜索不是"研究前先搜一遍"**——它是**决策的第五维**:LLM 生成查询做程序化预搜,搜到的内容压缩后变成布尔值 `search_anchored`(能否锚定主题),与前四维(主题/边界/受众/时间范围)一起输入确定性规则,**代码决定问不问**,而非让 LLM 自判。
-
-## 相对上游的改进
-
-| 改进 | 上游问题 | DeepClarity 方案 |
-|------|----------|-----------------|
-| 澄清判断 | LLM 自判→死循环 | 预搜索锚定+五维打分+代码规则+3轮硬上限 |
-| 状态持久化 | 本地无 checkpointer→失忆 | MemorySaver 多轮累积 |
-| 搜索限流 | DDG 限流时静默失败 | 分层重试+单查询容错+最坏降级 |
-| 评估超时 | LLM 调用无超时→静默挂起 | 60s 超时→按假设推进 |
-| 并发控制 | 研究突发打满搜索 API | Semaphore 限流 |
-| 追问收敛 | 次维度模糊每轮追问 | 已答后仅 subject 模糊才问 |
-| 向量记忆 | 摘要即终点 | 边读边 embed,语义回看 |
-| 成本追踪 | 无 | 双层追踪(进程内+cc-switch) |
-
-## 快速开始
+Run deterministic checks:
 
 ```bash
-git clone https://github.com/gj6khqpm6d-source/DeepClarity.git
-cd DeepClarity
-uv venv && source .venv/bin/activate
-uv sync
-cp .env.example .env   # 编辑 .env 设置模型和搜索 API
-streamlit run app.py   # 启动本地 UI
+python -m pytest -q
+python eval_rag.py
+python evals/calibrate_judge.py evals/human_judge_labels.example.json
+python evals/run_fault_injection_v1.py
 ```
 
-推荐切换到 Tavily(免费档 1000 次/月):
+Run the online pilot only after configuring the API key:
+
+```bash
+python evals/run_pilot_v1.py
 ```
-SEARCH_API=tavily
-TAVILY_API_KEY=你的key
+
+The pilot writes evals/runs/pilot-v1/pilot_v1_results.json. It is a current-version pilot, not an A/B comparison. Never turn a failed preflight or a three-task sample into a production success rate.
+
+## Latency and interview trade-offs
+
+The full quality path may be slow because it performs clarification/pre-search, brief generation, supervisor planning, researcher loops, compression, and final report generation. DeepSeek network latency and DuckDuckGo rate limits add variance.
+
+For a live interview demo, use a bounded fast profile:
+
+- disable clarification for a well-specified question;
+- cap supervisor iterations at 2;
+- cap researcher tool iterations at 2;
+- allow at most 1 structured-output retry;
+- use a fixed, narrow question;
+- use replay fixtures when demonstrating orchestration rather than provider latency.
+
+For production-oriented optimization, measure first, then consider query/result caching, faster routing models, parallel independent retrieval, adaptive early stopping, provider fallback, and token-aware context budgets.
+
+## Interview walkthrough
+
+A concise explanation is:
+
+> I started from failure modes in a multi-turn research agent: clarification loops, unbounded observations, rate-limited tools, partial sub-agent failures, and poor reproducibility. I separated model proposals from runtime policy: the LLM scores and plans, while code enforces termination, deadlines, context budgets, concurrency, and fallback behavior. I then added task/session memory, observation masking with retrieve-then-load, cached task-aware MCP tool search, metadata-only telemetry, replay fixtures, and Auto-RCA. Finally, I separated offline regression from online quality evaluation so I do not confuse implemented infrastructure with measured product metrics.
+
+Good demonstrations:
+
+1. show the clarification rule and its termination test;
+2. run fake-tool fault injection and inspect the trace;
+3. submit one narrowly scoped question in the Streamlit UI;
+4. show context masking or memory retrieval in a unit test;
+5. explain why the current pilot is not enough to claim P50/P95 or judge–human agreement;
+6. discuss quality-path versus fast-path latency and cost.
+
+## Project structure
+
+```text
+app.py                              Streamlit UI and diagnostic trace download
+src/open_deep_research/
+  deep_researcher.py                LangGraph runtime and agent loops
+  configuration.py                  Runtime budgets and provider settings
+  state.py                          Graph state and structured judgments
+  prompts.py                        Model instructions
+  context_engine.py                 Context budgets, masking, trust boundaries
+  vector_memory.py                  Task/session memory and JIT retrieval
+  tool_registry.py                  MCP inventory, cache, and tool search
+  utils.py                          Search providers and MCP integration
+  telemetry.py                      Metadata-only runtime events
+  cost_tracker.py                   In-process token/cost callbacks
+  evaluation.py                     Replay, Auto-RCA, and judge calibration
+evals/                              Versioned cases and pilot runners
+tests/                              Network-free deterministic regression suite
+docs/
+  eval-framework.md                 Evaluation contract and evidence boundaries
+  improvements-and-advantages.md    Detailed root-cause and design record
+  interview-preparation-agent-runtime.md  Interview questions and study notes
+ISSUES.md                           Root-cause, fix, verification, and pitfalls log
 ```
 
-## 五层评估
+## Upstream and license
 
-| 层 | 评分 | 说明 |
-|----|------|------|
-| 1. 任务完成 | 40% | 100%出报告+终止保证;缺固定回归集 |
-| 2. 输出质量 | 30% | LLM-as-Judge 基建到位;2查询4-5/5 |
-| 3. 效率成本 | 60% | 双层追踪(进程内+cc-switch) |
-| 4. 鲁棒性 | **90%** | 6修复+故障注入测试 |
-| 5. 安全对齐 | 10% | 向量记忆有溯源;prompt injection 未做 |
+DeepClarity is built on open-deep-research and keeps its research workflow while adding local runtime, context, memory, tool, reliability, and evaluation layers.
 
-详见 [docs/eval-framework.md](docs/eval-framework.md) | 评估数据:[eval_results.json](eval_results.json)
-
-## License
+See the upstream project for original attribution and [LICENSE](LICENSE) for license terms.
 
 MIT
+
+## Current scope
+
+This repository is a local research and interview-ready runtime prototype. It demonstrates the engineering foundations needed for agent systems, but it is not evidence of post-training, large-scale multilingual rollout, or a closed-loop online policy optimizer. Those claims require separate datasets, controlled experiments, deployment infrastructure, and measured artifacts.
