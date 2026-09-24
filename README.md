@@ -15,7 +15,7 @@
   <img src="https://img.shields.io/badge/DeepSeek-Model-5B5BD6?style=for-the-badge" alt="DeepSeek" />
 </p>
 
-<p><a href="#design-process">Design process</a> · <a href="#architecture">Architecture</a> · <a href="#quick-start">Quick start</a> · <a href="#evaluation-evidence">Evaluation</a> · <a href="#interview-walkthrough">Interview walkthrough</a></p>
+<p><a href="#design-process">Design process</a> · <a href="#architecture">Architecture</a> · <a href="#quick-start">Quick start</a> · <a href="#evaluation-evidence">Evaluation</a></p>
 
 </div>
 
@@ -198,35 +198,11 @@ python evals/run_pilot_v1.py
 
 The pilot writes evals/runs/pilot-v1/pilot_v1_results.json. It is a current-version pilot, not an A/B comparison. Never turn a failed preflight or a three-task sample into a production success rate.
 
-## Latency and interview trade-offs
+## Latency considerations
 
 The full quality path may be slow because it performs clarification/pre-search, brief generation, supervisor planning, researcher loops, compression, and final report generation. DeepSeek network latency and DuckDuckGo rate limits add variance.
 
-For a live interview demo, use a bounded fast profile:
-
-- disable clarification for a well-specified question;
-- cap supervisor iterations at 2;
-- cap researcher tool iterations at 2;
-- allow at most 1 structured-output retry;
-- use a fixed, narrow question;
-- use replay fixtures when demonstrating orchestration rather than provider latency.
-
 For production-oriented optimization, measure first, then consider query/result caching, faster routing models, parallel independent retrieval, adaptive early stopping, provider fallback, and token-aware context budgets.
-
-## Interview walkthrough
-
-A concise explanation is:
-
-> I started from failure modes in a multi-turn research agent: clarification loops, unbounded observations, rate-limited tools, partial sub-agent failures, and poor reproducibility. I separated model proposals from runtime policy: the LLM scores and plans, while code enforces termination, deadlines, context budgets, concurrency, and fallback behavior. I then added task/session memory, observation masking with retrieve-then-load, cached task-aware MCP tool search, metadata-only telemetry, replay fixtures, and Auto-RCA. Finally, I separated offline regression from online quality evaluation so I do not confuse implemented infrastructure with measured product metrics.
-
-Good demonstrations:
-
-1. show the clarification rule and its termination test;
-2. run fake-tool fault injection and inspect the trace;
-3. submit one narrowly scoped question in the Streamlit UI;
-4. show context masking or memory retrieval in a unit test;
-5. explain why the current pilot is not enough to claim P50/P95 or judge–human agreement;
-6. discuss quality-path versus fast-path latency and cost.
 
 ## Project structure
 
@@ -249,7 +225,6 @@ tests/                              Network-free deterministic regression suite
 docs/
   eval-framework.md                 Evaluation contract and evidence boundaries
   improvements-and-advantages.md    Detailed root-cause and design record
-  interview-preparation-agent-runtime.md  Interview questions and study notes
 ISSUES.md                           Root-cause, fix, verification, and pitfalls log
 ```
 
@@ -263,4 +238,4 @@ MIT
 
 ## Current scope
 
-This repository is a local research and interview-ready runtime prototype. It demonstrates the engineering foundations needed for agent systems, but it is not evidence of post-training, large-scale multilingual rollout, or a closed-loop online policy optimizer. Those claims require separate datasets, controlled experiments, deployment infrastructure, and measured artifacts.
+This repository is a local research runtime prototype. It demonstrates agent-system engineering foundations, but it is not evidence of post-training, large-scale multilingual rollout, or a closed-loop online policy optimizer. Those claims require separate datasets, controlled experiments, deployment infrastructure, and measured artifacts.

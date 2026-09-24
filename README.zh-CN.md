@@ -15,7 +15,7 @@
   <img src="https://img.shields.io/badge/DeepSeek-Model-5B5BD6?style=for-the-badge" alt="DeepSeek" />
 </p>
 
-<p><a href="#设计过程">设计过程</a> · <a href="#系统架构">系统架构</a> · <a href="#快速开始">快速开始</a> · <a href="#评测证据">评测</a> · <a href="#面试讲解">面试讲解</a></p>
+<p><a href="#设计过程">设计过程</a> · <a href="#系统架构">系统架构</a> · <a href="#快速开始">快速开始</a> · <a href="#评测证据">评测</a></p>
 
 </div>
 
@@ -198,35 +198,11 @@ python evals/run_pilot_v1.py
 
 结果写入 evals/runs/pilot-v1/pilot_v1_results.json。它是当前版本的三任务试跑，不是 A/B 对照。不能把失败的 preflight 或三任务样本写成生产成功率。
 
-## 延迟与面试演示取舍
+## 延迟说明
 
 完整质量路径可能较慢，因为包含澄清/预搜索、研究简报、Supervisor 规划、若干 researcher loop、压缩和最终报告。DeepSeek 网络延迟与 DuckDuckGo 限流也会造成波动。
 
-面试现场可以使用有界 fast profile：
-
-- 对问题清晰的 prompt 关闭澄清；
-- Supervisor 最多 2 次迭代；
-- researcher 最多 2 次工具循环；
-- 结构化输出最多重试 1 次；
-- 使用固定且范围明确的问题；
-- 展示编排逻辑时使用 replay fixture，避免把 Provider 网络延迟当成系统能力。
-
 生产优化应先测量再修改，可考虑 query/result cache、更快的小模型路由、独立检索并行、自适应提前停止、Provider fallback 和 token-aware context budget。
-
-## 面试讲解
-
-可以这样介绍：
-
-> 我从多轮研究 Agent 的失败模式出发：澄清循环、observation 无限增长、工具限流、子 Agent 局部失败和运行不可复现。我把模型提议和 Runtime 策略分离：LLM 负责打分和规划，代码负责终止、deadline、上下文预算、并发和降级。随后加入 task/session memory、observation masking + retrieve-then-load、任务相关 MCP 工具搜索、metadata-only telemetry、replay fixture 和 Auto-RCA。最后把离线回归与在线质量评测分开，避免把已经搭建的基础设施写成未经测量的产品指标。
-
-建议现场演示：
-
-1. 展示澄清规则及其终止测试；
-2. 运行 fake-tool 故障注入并查看 trace；
-3. 在 Streamlit 页面提交一个范围明确的问题；
-4. 展示上下文 masking 或记忆召回单测；
-5. 解释为什么当前 pilot 不足以宣称 P50/P95 或 judge–human agreement；
-6. 讨论质量路径和 fast path 的延迟、成本取舍。
 
 ## 项目结构
 
@@ -249,7 +225,6 @@ tests/                              无网络确定性回归测试
 docs/
   eval-framework.md                 评测契约和证据边界
   improvements-and-advantages.md    详细根因与设计记录
-  interview-preparation-agent-runtime.md  面试问题与学习资料
 ISSUES.md                           根因、修复、验证和陷阱记录
 ```
 
@@ -263,4 +238,4 @@ MIT
 
 ## 当前范围
 
-本仓库是一个本地研究和面试展示用 Runtime 原型。它展示了 Agent 系统所需的工程基础，但不是 SFT、DPO、RLHF、生产规模多语种上线或闭环在线策略优化的证据。上述能力需要独立数据集、受控实验、部署基础设施和版本化测量 artifact。
+本仓库是一个本地研究 Runtime 原型。它展示了 Agent 系统所需的工程基础，但不是 SFT、DPO、RLHF、生产规模多语种上线或闭环在线策略优化的证据。上述能力需要独立数据集、受控实验、部署基础设施和版本化测量 artifact。
